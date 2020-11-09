@@ -1,0 +1,298 @@
+# This is a workflow which deploys Azure Resources
+name: Deploy Azure Resources
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+    DOTNET_VERSION: '3.1.402' #TODO: figure out version
+    
+jobs:
+  Dev-Deploy-Azure-Resources:   
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout BLEP Repository
+        uses: actions/checkout@v2
+
+      - name: Install Azure PowerShell
+        shell: pwsh
+        run: Install-Module -Name Az -RequiredVersion ((Find-Module -Name Az)[0].Version) -AllowClobber -Scope CurrentUser -Force
+        
+      - name: Login to Azure
+        shell: pwsh
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: ./scripts/Azure_login.ps1
+
+      - name: Run Script to Check & ARM Deploy for EventGrid
+        shell: pwsh
+        run: ./scripts/Azure_deploy.ps1 -resourceName blep-dev-feedback-topic -resourceGroup ${{ secrets.AZURE_RESOURCE_GROUP_DEV }} -resourceType Microsoft.EventGrid/topics -subscriptionId ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }} -templateFile ./.github/DeployTemplates/blep-dev-feedback-topic.json -parameterFile ./.github/DeployTemplates/blep-dev-feedback-topic.parameters.json
+
+      - name: Run Script to Check & ARM Deploy for Feedback Stg
+        shell: pwsh
+        run: ./scripts/Azure_deploy.ps1 -resourceName blepdevstg -resourceGroup ${{ secrets.AZURE_RESOURCE_GROUP_DEV }} -resourceType Microsoft.Storage/storageAccounts -subscriptionId ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }} -templateFile ./.github/DeployTemplates/blep-dev-stg.json -parameterFile ./.github/DeployTemplates/blep-dev-stg.parameters.json
+        
+      - name: Run Script to Check & ARM Deploy for DLR Portal
+        shell: pwsh
+        run: ./scripts/Azure_deploy.ps1 -resourceName blep-dev-webapp -resourceGroup ${{ secrets.AZURE_RESOURCE_GROUP_DEV }} -resourceType Microsoft.Web/sites -subscriptionId ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }} -templateFile ./.github/DeployTemplates/blep-dev-webapp.json -parameterJson '${{ secrets.BLEP_DEV_WEBAPP_PARAMETERS }}'
+
+      - name: Run Script to Check & ARM Deploy for DLR Api Function App
+        shell: pwsh
+        run: ./scripts/Azure_deploy.ps1 -resourceName blep-dev-dlr-api -resourceGroup ${{ secrets.AZURE_RESOURCE_GROUP_DEV }} -resourceType Microsoft.Web/sites -subscriptionId ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }} -templateFile ./.github/DeployTemplates/blep-dev-dlr-api.json -parameterJson '${{ secrets.BLEP_DEV_DLRAPI_PARAMETERS }}'
+      
+#############################################################################################################################################
+
+  Dev-Ready-Deploy-Apps:
+    runs-on: ubuntu-latest
+
+    needs: Dev-Deploy-Azure-Resources
+
+    outputs:
+      portal: ${{ steps.webapp-changes.outputs.portal }}
+      dlr_api: ${{ steps.webapp-changes.outputs.dlr_api }}
+
+    steps:
+      - name: Checkout BLEP Repository
+        uses: actions/checkout@v2
+
+      - name: Check Update on Components
+        uses: dorny/paths-filter@v2
+        id: webapp-changes
+        with:
+          filters: |
+            portal:
+              - 'src/main/dotnet/DLRPortal/**'
+            dlr_api:
+              - 'src/main/dotnet/FunctionApps/DLRApi/**'
+
+#############################################################################################################################################
+
+  Dev-Deploy-Webapp-Portal:
+    needs: Dev-Ready-Deploy-Apps
+
+    # if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true' # Remove Global Job Condition So it does not Consider Job As Skipped
+
+    outputs:
+      release: ${{ steps.dev-webapp-release.outputs.release }}
+
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout BLEP Repository
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        uses: actions/checkout@v2
+
+      - name: Setup .NET Core
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: dotnet build
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        run: dotnet build
+
+      - name: Publish DLRPortal
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        run: dotnet publish ./src/main/dotnet/DLRPortal/DLRPortal.csproj -o ./DLRPortal
+
+      - name: Login via Azure CLI
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run Azure webapp deploy action using publish profile credentials
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        uses: azure/webapps-deploy@v1
+        with: 
+          app-name: blep-dev-webapp
+          package: './DLRPortal'
+
+      - name: Zip Binary
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        run: zip -r DLRPortal.zip DLRPortal 
+
+      - name: Upload a Build Artifact
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        uses: actions/upload-artifact@v2.2.0
+        with:
+          name: DLRPortal
+          path: |
+              ./DLRPortal.zip
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Set Release Webapp Portal
+        if: needs.Dev-Ready-Deploy-Apps.outputs.portal == 'true'
+        id: dev-webapp-release
+        run: echo "::set-output name=release::true"
+
+
+
+  Dev-Deploy-DLRApi:
+    needs: Dev-Ready-Deploy-Apps
+
+    # if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true' # Remove Global Job Condition So it does not Consider Job As Skipped
+
+    outputs:
+      release: ${{ steps.dev-dlrapi-release.outputs.release }}
+
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Auto Run True
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        run: true
+
+      - name: Set Release DLRApi Portal
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        id: dev-dlrapi-release
+        run: echo "::set-output name=release::true"
+
+      - name: Checkout BLEP Repository
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        uses: actions/checkout@v2
+
+      - name: Setup .NET Core
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: dotnet build
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        run: dotnet build
+
+      - name: Publish DLRPortal
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        run: dotnet publish ./src/main/dotnet/FunctionApps/DLRApi/DLRApi.csproj -o ./DLRApi
+
+      - name: Login via Azure CLI
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: 'Deploy Azure Function App (DLR Api)'
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        uses: Azure/functions-action@v1
+        with:
+          app-name: blep-dev-dlr-api
+          package: './DLRApi'        
+
+      - name: Zip Binary
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        run: zip -r DLRApi.zip DLRApi
+
+      - name: Upload a Build Artifact
+        if: needs.Dev-Ready-Deploy-Apps.outputs.dlr_api == 'true'
+        uses: actions/upload-artifact@v2.2.0
+        with:
+          name: DLRApi
+          path: |
+              ./DLRApi.zip
+          if-no-files-found: error
+          retention-days: 90
+   
+#############################################################################################################################################
+
+  Stage-Integration-Tests:
+    needs: [Dev-Deploy-Webapp-Portal, Dev-Deploy-DLRApi]
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto Run True For Integration Tests
+        run: true
+        
+#############################################################################################################################################
+
+  Stage-Release-Webapp-Portal:
+    needs: [Dev-Deploy-Webapp-Portal, Stage-Integration-Tests]
+    if: needs.Dev-Deploy-Webapp-Portal.outputs.release == 'true'
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v2.0.5
+        with:
+          name: DLRPortal
+
+      - name: Get token
+        id: get_token
+        uses: machine-learning-apps/actions-app-token@master
+        with:
+          APP_PEM: ${{ secrets.BLEP_APP_PEM }}
+          APP_ID: ${{ secrets.BLEP_APP_ID }}
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ steps.get_token.outputs.app_token }}
+        with:
+          tag_name: "latest-dlrportal"
+          release_name: "DLRPortal-latest"
+          draft: true
+          prerelease: false
+        
+      - name: Upload Release Asset
+        id: upload-release 
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ steps.get_token.outputs.app_token }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./DLRPortal.zip
+          asset_name: DLRPortal.zip
+          asset_content_type: application/zip
+
+
+  Stage-Release-DLRApi:
+    needs: [Dev-Deploy-DLRApi, Stage-Integration-Tests]
+    if: needs.Dev-Deploy-DLRApi.outputs.release == 'true'
+
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v2.0.5
+        with:
+          name: DLRApi
+
+      - name: Get token
+        id: get_token
+        uses: machine-learning-apps/actions-app-token@master
+        with:
+          APP_PEM: ${{ secrets.BLEP_APP_PEM }}
+          APP_ID: ${{ secrets.BLEP_APP_ID }}
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ steps.get_token.outputs.app_token }}
+        with:
+          tag_name: "latest-dlrapi"
+          release_name: "DLRApi-latest"
+          draft: false
+          prerelease: false
+        
+      - name: Upload Release Asset
+        id: upload-release 
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ steps.get_token.outputs.app_token }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./DLRApi.zip
+          asset_name: DLRApi.zip
+          asset_content_type: application/zip
+
+
+#############################################################################################################################################
+
+# PUSH TO PROD IN DIFFERENT WORKFLOW IF (THIS WORKFLOW CAN EMIT SUCCESSFUL) OR (TRIGGER ON RELEASE)
